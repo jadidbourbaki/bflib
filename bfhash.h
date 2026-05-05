@@ -1,6 +1,7 @@
 /*
- * witchhash is a Bloom-filter-specialized hash. One 64x64 -> 128 multiply
- * yields the two hashes used for Kirsch-Mitzenmacher double hashing.
+ * bfhash is the Bloom-filter-specialized hash used by bflib. One
+ * 64x64 -> 128 multiply yields the two hashes used for Kirsch-
+ * Mitzenmacher double hashing.
  *
  * Several techniques and one constant are borrowed from rapidhash V3
  * by Nicolas De Carli, used under the MIT license. Each borrowing is
@@ -19,76 +20,76 @@
 #  endif
 #endif
 
-/* START OF WITCHHASH MACROS */
-/* The WITCHHASH_* macros below mirror rapidhash with RAPIDHASH_*
-   renamed to WITCHHASH_*. The rename keeps the namespace clear for
-   projects that include both rapidhash and witchhash. */
+/* START OF BFLIB MACROS */
+/* The BF_* macros below mirror rapidhash with RAPIDHASH_* renamed
+   to BF_*. The rename keeps the namespace clear for projects that
+   include both rapidhash and bflib. */
 #ifdef _MSC_VER
-#  define WITCHHASH_ALWAYS_INLINE __forceinline
+#  define BF_ALWAYS_INLINE __forceinline
 #elif defined(__GNUC__)
-#  define WITCHHASH_ALWAYS_INLINE inline __attribute__((__always_inline__))
+#  define BF_ALWAYS_INLINE inline __attribute__((__always_inline__))
 #else
-#  define WITCHHASH_ALWAYS_INLINE inline
+#  define BF_ALWAYS_INLINE inline
 #endif
 
 #ifdef __cplusplus
-#  define WITCHHASH_NOEXCEPT noexcept
-#  define WITCHHASH_CONSTEXPR constexpr
-#  ifndef WITCHHASH_INLINE
-#    define WITCHHASH_INLINE WITCHHASH_ALWAYS_INLINE
+#  define BF_NOEXCEPT noexcept
+#  define BF_CONSTEXPR constexpr
+#  ifndef BF_INLINE
+#    define BF_INLINE BF_ALWAYS_INLINE
 #  endif
 #  if __cplusplus >= 201402L && !defined(_MSC_VER)
-#    define WITCHHASH_INLINE_CONSTEXPR WITCHHASH_ALWAYS_INLINE constexpr
+#    define BF_INLINE_CONSTEXPR BF_ALWAYS_INLINE constexpr
 #  else
-#    define WITCHHASH_INLINE_CONSTEXPR WITCHHASH_ALWAYS_INLINE
+#    define BF_INLINE_CONSTEXPR BF_ALWAYS_INLINE
 #  endif
 #else
-#  define WITCHHASH_NOEXCEPT
-#  define WITCHHASH_CONSTEXPR static const
-#  ifndef WITCHHASH_INLINE
-#    define WITCHHASH_INLINE static WITCHHASH_ALWAYS_INLINE
+#  define BF_NOEXCEPT
+#  define BF_CONSTEXPR static const
+#  ifndef BF_INLINE
+#    define BF_INLINE static BF_ALWAYS_INLINE
 #  endif
-#  define WITCHHASH_INLINE_CONSTEXPR WITCHHASH_INLINE
+#  define BF_INLINE_CONSTEXPR BF_INLINE
 #endif
 
 
-#ifndef WITCHHASH_LITTLE_ENDIAN
+#ifndef BF_LITTLE_ENDIAN
 #  if defined(_WIN32) || defined(__LITTLE_ENDIAN__) || \
       (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
-#    define WITCHHASH_LITTLE_ENDIAN
+#    define BF_LITTLE_ENDIAN
 #  elif defined(__BIG_ENDIAN__) || \
       (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-#    define WITCHHASH_BIG_ENDIAN
+#    define BF_BIG_ENDIAN
 #  else
 #    warning "could not determine endianness! Falling back to little endian."
-#    define WITCHHASH_LITTLE_ENDIAN
+#    define BF_LITTLE_ENDIAN
 #  endif
 #endif
-/* END OF WITCHHASH MACROS */
+/* END OF BFLIB MACROS */
 
 /* The starting value is rapidhash V3's secret[0]. TODO: replace this
    with a value tuned for avalanche on the bits actually extracted as
    Bloom indices. */
-#ifndef WITCH_SECRET
-#define WITCH_SECRET UINT64_C(0x2d358dccaa6c78a5)
+#ifndef BFHASH_SECRET
+#define BFHASH_SECRET UINT64_C(0x2d358dccaa6c78a5)
 #endif
 
-/* Seed counts per hash function. Each witchhash_* function takes
-   `seeds`, a pointer to an array of WITCHHASH_*_SEEDS uniform random
-   uint64. A Bloom filter using witchhash generates this array
+/* Seed counts per hash function. Each bfhash_* function takes
+   `seeds`, a pointer to an array of BFHASH_*_SEEDS uniform random
+   uint64. A Bloom filter using bfhash generates this array
    once at filter creation. */
-#define WITCHHASH_U64_SEEDS    3
-#define WITCHHASH_SHORT_SEEDS  3
-#define WITCHHASH_MEDIUM_SEEDS 5
-#define WITCHHASH_LONG_SEEDS   1
+#define BFHASH_U64_SEEDS    3
+#define BFHASH_SHORT_SEEDS  3
+#define BFHASH_MEDIUM_SEEDS 5
+#define BFHASH_LONG_SEEDS   1
 
-/* Per-lane secrets for witchhash_long's parallel-lane mixing. Taken
+/* Per-lane secrets for bfhash_long's parallel-lane mixing. Taken
    verbatim from rapidhash V3's secret[0..6]. They are file constants
    rather than per-filter seeds because their role in the long path is
    empirical lane decorrelation as opposed to any adversarial guarantees. 
    Inheriting rapidhash's tuned values means inheriting their SMHasher pass
    quality for free. */
-WITCHHASH_CONSTEXPR uint64_t witch_long_secret[7] = {
+BF_CONSTEXPR uint64_t bfhash_long_secret[7] = {
     UINT64_C(0x2d358dccaa6c78a5),
     UINT64_C(0x8bb84b93962eacc9),
     UINT64_C(0x4b33a62ed433d4a3),
@@ -99,16 +100,16 @@ WITCHHASH_CONSTEXPR uint64_t witch_long_secret[7] = {
 };
 
 /* Verbatim from rapidhash's rapid_read64 with rapid_ renamed to
-   witch_ and RAPIDHASH_* renamed to WITCHHASH_*. The rename prevents
+   bfhash_ and RAPIDHASH_* renamed to BF_*. The rename prevents
    namespace collisions. */
-#ifdef WITCHHASH_LITTLE_ENDIAN
-WITCHHASH_INLINE uint64_t witch_read64(const uint8_t *p) WITCHHASH_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return v;}
+#ifdef BF_LITTLE_ENDIAN
+BF_INLINE uint64_t bfhash_read64(const uint8_t *p) BF_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return v;}
 #elif defined(__GNUC__) || defined(__INTEL_COMPILER) || defined(__clang__)
-WITCHHASH_INLINE uint64_t witch_read64(const uint8_t *p) WITCHHASH_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return __builtin_bswap64(v);}
+BF_INLINE uint64_t bfhash_read64(const uint8_t *p) BF_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return __builtin_bswap64(v);}
 #elif defined(_MSC_VER)
-WITCHHASH_INLINE uint64_t witch_read64(const uint8_t *p) WITCHHASH_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return _byteswap_uint64(v);}
+BF_INLINE uint64_t bfhash_read64(const uint8_t *p) BF_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return _byteswap_uint64(v);}
 #else
-WITCHHASH_INLINE uint64_t witch_read64(const uint8_t *p) WITCHHASH_NOEXCEPT {
+BF_INLINE uint64_t bfhash_read64(const uint8_t *p) BF_NOEXCEPT {
   uint64_t v; memcpy(&v, p, 8);
   return (((v >> 56) & 0xff)| ((v >> 40) & 0xff00)| ((v >> 24) & 0xff0000)| ((v >>  8) & 0xff000000)| ((v <<  8) & 0xff00000000)| ((v << 24) & 0xff0000000000)| ((v << 40) & 0xff000000000000)| ((v << 56) & 0xff00000000000000));
 }
@@ -116,9 +117,9 @@ WITCHHASH_INLINE uint64_t witch_read64(const uint8_t *p) WITCHHASH_NOEXCEPT {
 
 /* 64x64 -> 128 bit multiply.
  *
- * The body of witch_mul128 is the unprotected branch in rapidhash's
+ * The body of bfhash_mul128 is the unprotected branch in rapidhash's
  * rapid_mum. The interface differs. rapid_mum takes two uint64_t
- * pointers and overwrites them with the product halves. witch_mul128
+ * pointers and overwrites them with the product halves. bfhash_mul128
  * takes two uint64_t values and writes the product halves to separate
  * output pointers. The pass-by-value form keeps call sites readable
  * because callers can pass any expression as input.
@@ -128,8 +129,8 @@ WITCHHASH_INLINE uint64_t witch_read64(const uint8_t *p) WITCHHASH_NOEXCEPT {
  * @param  lo  Output: low 64 bits of a * b.
  * @param  hi  Output: high 64 bits of a * b.
  */
-WITCHHASH_INLINE_CONSTEXPR void witch_mul128(uint64_t a, uint64_t b,
-                               uint64_t *lo, uint64_t *hi) WITCHHASH_NOEXCEPT {
+BF_INLINE_CONSTEXPR void bfhash_mul128(uint64_t a, uint64_t b,
+                               uint64_t *lo, uint64_t *hi) BF_NOEXCEPT {
 #if defined(__SIZEOF_INT128__)
     __uint128_t r=a; r*=b;
     *lo=(uint64_t)r; *hi=(uint64_t)(r>>64);
@@ -151,12 +152,12 @@ WITCHHASH_INLINE_CONSTEXPR void witch_mul128(uint64_t a, uint64_t b,
 #endif
 }
 
-/* witch_mix: 64x64 -> 128 multiply, then XOR the halves into one
+/* bfhash_mix: 64x64 -> 128 multiply, then XOR the halves into one
    uint64. Equivalent to rapid_mix from rapidhash. Used inside
-   witchhash_long's lane mixing. */
-WITCHHASH_INLINE_CONSTEXPR uint64_t witch_mix(uint64_t a, uint64_t b) WITCHHASH_NOEXCEPT {
+   bfhash_long's lane mixing. */
+BF_INLINE_CONSTEXPR uint64_t bfhash_mix(uint64_t a, uint64_t b) BF_NOEXCEPT {
     uint64_t lo = 0, hi = 0;
-    witch_mul128(a, b, &lo, &hi);
+    bfhash_mul128(a, b, &lo, &hi);
     return lo ^ hi;
 }
 
@@ -173,7 +174,7 @@ WITCHHASH_INLINE_CONSTEXPR uint64_t witch_mix(uint64_t a, uint64_t b) WITCHHASH_
  * l <= 32. This is theorem 3.7 of [1] specialized to d = 2 with 32-bit
  * coordinates and w = 64.
  *
- * Witchhash_u64 keeps the full 128-bit product instead of truncating
+ * Bfhash_u64 keeps the full 128-bit product instead of truncating
  * to 64. The low 64 bits, after adding b, become h1; the top 32 bits
  * of h1 carry Thorup's strong universality bound. The high 64 bits of
  * the product become h2; h2 is a function of all 128 bits of the
@@ -215,7 +216,7 @@ WITCHHASH_INLINE_CONSTEXPR uint64_t witch_mix(uint64_t a, uint64_t b) WITCHHASH_
  * cycles.
  *
  * @param  key    The 8-byte key to hash, passed by value.
- * @param  seeds  Array of WITCHHASH_U64_SEEDS = 3 uniform random
+ * @param  seeds  Array of BFHASH_U64_SEEDS = 3 uniform random
  *                uint64. seeds[0] = a1, seeds[1] = a2, seeds[2] = b
  *                in Thorup's notation.
  * @param  h1     Output: low 64 bits of (a1+key) * (a2+(key>>32)) + b.
@@ -223,11 +224,11 @@ WITCHHASH_INLINE_CONSTEXPR uint64_t witch_mix(uint64_t a, uint64_t b) WITCHHASH_
  * @param  h2     Output: high 64 bits of the same product. Empirically
  *                well-mixed.
  */
-WITCHHASH_INLINE_CONSTEXPR void witchhash_u64(uint64_t key,
+BF_INLINE_CONSTEXPR void bfhash_u64(uint64_t key,
                                     const uint64_t *seeds,
-                                    uint64_t *h1, uint64_t *h2) WITCHHASH_NOEXCEPT {
+                                    uint64_t *h1, uint64_t *h2) BF_NOEXCEPT {
     uint64_t lo = 0, hi = 0;
-    witch_mul128(seeds[0] + key, seeds[1] + (key >> 32), &lo, &hi);
+    bfhash_mul128(seeds[0] + key, seeds[1] + (key >> 32), &lo, &hi);
     *h1 = lo + seeds[2];
     *h2 = hi;
 }
@@ -250,7 +251,7 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_u64(uint64_t key,
  * offset to disambiguate inputs of different lengths covered by the
  * same overlap-read.
  *
- * Witchhash_short keeps the full 128-bit product. The low 64 bits,
+ * Bfhash_short keeps the full 128-bit product. The low 64 bits,
  * plus a_2 plus len, become h1; the top 32 bits of h1 are strongly
  * universal per Thorup. The high 64 bits become h2, empirically
  * well-mixed.
@@ -264,7 +265,7 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_u64(uint64_t key,
  * the two operands differ regardless, so the multiply is never a
  * square.
  *
- * The extraction-method contract is the same as witchhash_u64. See
+ * The extraction-method contract is the same as bfhash_u64. See
  * its comment for the two safe methods and the structural reason low
  * bits are not universal.
  *
@@ -276,7 +277,7 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_u64(uint64_t key,
  *
  * @param  key    Pointer to a key of length [8, 16] bytes.
  * @param  len    Key length in bytes. Must be in [8, 16].
- * @param  seeds  Array of WITCHHASH_SHORT_SEEDS = 3 uniform random
+ * @param  seeds  Array of BFHASH_SHORT_SEEDS = 3 uniform random
  *                uint64. seeds[0] = a_0, seeds[1] = a_1, seeds[2] =
  *                a_2 in Thorup's notation.
  * @param  h1     Output: low 64 bits of (a_0 + x_1)(a_1 + x_0) plus
@@ -284,14 +285,14 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_u64(uint64_t key,
  * @param  h2     Output: high 64 bits of the same product. Empirically
  *                well-mixed.
  */
-WITCHHASH_INLINE_CONSTEXPR void witchhash_short(const void *key, size_t len,
+BF_INLINE_CONSTEXPR void bfhash_short(const void *key, size_t len,
                                        const uint64_t *seeds,
-                                       uint64_t *h1, uint64_t *h2) WITCHHASH_NOEXCEPT {
+                                       uint64_t *h1, uint64_t *h2) BF_NOEXCEPT {
     const uint8_t *p = (const uint8_t *)key;
-    uint64_t x0 = witch_read64(p);
-    uint64_t x1 = witch_read64(p + len - 8);
+    uint64_t x0 = bfhash_read64(p);
+    uint64_t x1 = bfhash_read64(p + len - 8);
     uint64_t lo = 0, hi = 0;
-    witch_mul128(seeds[0] + x1, seeds[1] + x0, &lo, &hi);
+    bfhash_mul128(seeds[0] + x1, seeds[1] + x0, &lo, &hi);
     *h1 = lo + seeds[2] + (uint64_t)len;
     *h2 = hi;
 }
@@ -325,7 +326,7 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_short(const void *key, size_t len,
  * Bloom filter generates them once at filter creation and passes them
  * to every hash call.
  *
- * The extraction-method contract is the same as witchhash_u64. See
+ * The extraction-method contract is the same as bfhash_u64. See
  * its comment for details.
  *
  * [1] Mikkel Thorup, "High Speed Hashing for Integers and Strings",
@@ -337,7 +338,7 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_short(const void *key, size_t len,
  *
  * @param  key    Pointer to a key of length [17, 32] bytes.
  * @param  len    Key length in bytes. Must be in [17, 32].
- * @param  seeds  Array of WITCHHASH_MEDIUM_SEEDS = 5 uniform random
+ * @param  seeds  Array of BFHASH_MEDIUM_SEEDS = 5 uniform random
  *                uint64. seeds[0..3] are the multipliers a_0..a_3;
  *                seeds[4] is the offset a_4.
  * @param  h1     Output: low 64 bits of the pair sum plus a_4 plus
@@ -345,17 +346,17 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_short(const void *key, size_t len,
  * @param  h2     Output: high 64 bits of the pair sum. Empirically
  *                well-mixed.
  */
-WITCHHASH_INLINE_CONSTEXPR void witchhash_medium(const void *key, size_t len,
+BF_INLINE_CONSTEXPR void bfhash_medium(const void *key, size_t len,
                                         const uint64_t *seeds,
-                                        uint64_t *h1, uint64_t *h2) WITCHHASH_NOEXCEPT {
+                                        uint64_t *h1, uint64_t *h2) BF_NOEXCEPT {
     const uint8_t *p = (const uint8_t *)key;
-    uint64_t x0 = witch_read64(p);
-    uint64_t x1 = witch_read64(p + 8);
-    uint64_t x2 = witch_read64(p + len - 16);
-    uint64_t x3 = witch_read64(p + len - 8);
+    uint64_t x0 = bfhash_read64(p);
+    uint64_t x1 = bfhash_read64(p + 8);
+    uint64_t x2 = bfhash_read64(p + len - 16);
+    uint64_t x3 = bfhash_read64(p + len - 8);
     uint64_t lo1 = 0, hi1 = 0, lo2 = 0, hi2 = 0;
-    witch_mul128(seeds[0] + x1, seeds[1] + x0, &lo1, &hi1);
-    witch_mul128(seeds[2] + x3, seeds[3] + x2, &lo2, &hi2);
+    bfhash_mul128(seeds[0] + x1, seeds[1] + x0, &lo1, &hi1);
+    bfhash_mul128(seeds[2] + x3, seeds[3] + x2, &lo2, &hi2);
     uint64_t lo_sum = lo1 + lo2;
     uint64_t carry = (lo_sum < lo1);
     *h1 = lo_sum + seeds[4] + (uint64_t)len;
@@ -369,12 +370,12 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_medium(const void *key, size_t len,
  * (the prologue and the final fold) and the secret table reused as
  * file constants. Below is rapidhash's long-key code from
  * rapidhash_internal in rapidhash.h, annotated line-by-line with
- * what witchhash_long does to it. Comments and braces collapsed for
+ * what bfhash_long does to it. Comments and braces collapsed for
  * readability.
  *
  *   seed ^= rapid_mix(seed ^ secret[2], secret[1]);
  *     [STRIPPED] Seed-mixing prologue. Defends against seed-correlation
- *     attacks. Witchhash assumes no adversary and the seed is fixed at
+ *     attacks. Bfhash assumes no adversary and the seed is fixed at
  *     filter creation, so this multiply plus fold serves no purpose.
  *
  *   if (len > 112) {
@@ -389,15 +390,15 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_medium(const void *key, size_t len,
  *       see6 = rapid_mix(read64(p +  96) ^ secret[6], read64(p + 104) ^ see6);
  *       p += 112; i -= 112;
  *     } while (i > 112);
- *     [KEPT verbatim, with rapid_mix renamed to witch_mix and
- *     secret[0..6] mapped to witch_long_secret[0..6]] The 7 parallel
+ *     [KEPT verbatim, with rapid_mix renamed to bfhash_mix and
+ *     secret[0..6] mapped to bfhash_long_secret[0..6]] The 7 parallel
  *     mixing lanes consuming 112 bytes per iteration. This is the
  *     entire speed win of the long-key path. Seven multiplies pipeline
  *     through the multiplier port at near-peak throughput. Each lane
  *     uses a different per-lane secret to keep the lanes from
  *     accumulating correlated state. The lane secrets are empirical
  *     lane decorrelation, not adversarial defense, so they live as
- *     file constants rather than per-filter seeds. Witchhash uses the
+ *     file constants rather than per-filter seeds. Bfhash uses the
  *     COMPACT 112-byte iteration; rapidhash also offers an UNROLLED
  *     224-byte variant for very long inputs, which we omit for code-
  *     size reasons.
@@ -430,7 +431,7 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_medium(const void *key, size_t len,
  *     finalization constant.
  *
  *   rapid_mum(&a, &b);
- *     [KEPT, renamed witch_mul128(a, b, h1, h2)] The unfolded multiply
+ *     [KEPT, renamed bfhash_mul128(a, b, h1, h2)] The unfolded multiply
  *     of the final operands. Both halves of the 128-bit product become
  *     h1 and h2 directly.
  *
@@ -449,7 +450,7 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_medium(const void *key, size_t len,
  * bits are well-distributed, which rapidhash has established for the
  * same 7-lane structure.
  *
- * The extraction-method contract is the same as witchhash_u64. See
+ * The extraction-method contract is the same as bfhash_u64. See
  * its comment for details.
  *
  * Critical path: about 25 cycles for 256-byte input, dominated by the
@@ -463,16 +464,16 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_medium(const void *key, size_t len,
  * @param  key    Pointer to a key longer than 32 bytes.
  * @param  len    Key length in bytes. Must be at least 17, intended
  *                for use when len > 32. For len in [17, 32] prefer
- *                witchhash_medium.
- * @param  seeds  Array of WITCHHASH_LONG_SEEDS = 1 uniform random
+ *                bfhash_medium.
+ * @param  seeds  Array of BFHASH_LONG_SEEDS = 1 uniform random
  *                uint64. seeds[0] is the master per-filter seed; the
  *                7 lane secrets are file constants.
  * @param  h1     Output: low 64 bits of the final 128-bit product.
  * @param  h2     Output: high 64 bits of the same product.
  */
-WITCHHASH_INLINE_CONSTEXPR void witchhash_long(const void *key, size_t len,
+BF_INLINE_CONSTEXPR void bfhash_long(const void *key, size_t len,
                                       const uint64_t *seeds,
-                                      uint64_t *h1, uint64_t *h2) WITCHHASH_NOEXCEPT {
+                                      uint64_t *h1, uint64_t *h2) BF_NOEXCEPT {
     const uint8_t *p = (const uint8_t *)key;
     size_t i = len;
     uint64_t seed = seeds[0];
@@ -482,13 +483,13 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_long(const void *key, size_t len,
         uint64_t see1 = seed, see2 = seed, see3 = seed;
         uint64_t see4 = seed, see5 = seed, see6 = seed;
         do {
-            seed = witch_mix(witch_read64(p +   0) ^ witch_long_secret[0], witch_read64(p +   8) ^ seed);
-            see1 = witch_mix(witch_read64(p +  16) ^ witch_long_secret[1], witch_read64(p +  24) ^ see1);
-            see2 = witch_mix(witch_read64(p +  32) ^ witch_long_secret[2], witch_read64(p +  40) ^ see2);
-            see3 = witch_mix(witch_read64(p +  48) ^ witch_long_secret[3], witch_read64(p +  56) ^ see3);
-            see4 = witch_mix(witch_read64(p +  64) ^ witch_long_secret[4], witch_read64(p +  72) ^ see4);
-            see5 = witch_mix(witch_read64(p +  80) ^ witch_long_secret[5], witch_read64(p +  88) ^ see5);
-            see6 = witch_mix(witch_read64(p +  96) ^ witch_long_secret[6], witch_read64(p + 104) ^ see6);
+            seed = bfhash_mix(bfhash_read64(p +   0) ^ bfhash_long_secret[0], bfhash_read64(p +   8) ^ seed);
+            see1 = bfhash_mix(bfhash_read64(p +  16) ^ bfhash_long_secret[1], bfhash_read64(p +  24) ^ see1);
+            see2 = bfhash_mix(bfhash_read64(p +  32) ^ bfhash_long_secret[2], bfhash_read64(p +  40) ^ see2);
+            see3 = bfhash_mix(bfhash_read64(p +  48) ^ bfhash_long_secret[3], bfhash_read64(p +  56) ^ see3);
+            see4 = bfhash_mix(bfhash_read64(p +  64) ^ bfhash_long_secret[4], bfhash_read64(p +  72) ^ see4);
+            see5 = bfhash_mix(bfhash_read64(p +  80) ^ bfhash_long_secret[5], bfhash_read64(p +  88) ^ see5);
+            see6 = bfhash_mix(bfhash_read64(p +  96) ^ bfhash_long_secret[6], bfhash_read64(p + 104) ^ see6);
             p += 112;
             i -= 112;
         } while (i > 112);
@@ -501,26 +502,26 @@ WITCHHASH_INLINE_CONSTEXPR void witchhash_long(const void *key, size_t len,
     }
 
     if (i > 16) {
-        seed = witch_mix(witch_read64(p +  0) ^ witch_long_secret[2], witch_read64(p +  8) ^ seed);
+        seed = bfhash_mix(bfhash_read64(p +  0) ^ bfhash_long_secret[2], bfhash_read64(p +  8) ^ seed);
         if (i > 32) {
-            seed = witch_mix(witch_read64(p + 16) ^ witch_long_secret[2], witch_read64(p + 24) ^ seed);
+            seed = bfhash_mix(bfhash_read64(p + 16) ^ bfhash_long_secret[2], bfhash_read64(p + 24) ^ seed);
             if (i > 48) {
-                seed = witch_mix(witch_read64(p + 32) ^ witch_long_secret[1], witch_read64(p + 40) ^ seed);
+                seed = bfhash_mix(bfhash_read64(p + 32) ^ bfhash_long_secret[1], bfhash_read64(p + 40) ^ seed);
                 if (i > 64) {
-                    seed = witch_mix(witch_read64(p + 48) ^ witch_long_secret[1], witch_read64(p + 56) ^ seed);
+                    seed = bfhash_mix(bfhash_read64(p + 48) ^ bfhash_long_secret[1], bfhash_read64(p + 56) ^ seed);
                     if (i > 80) {
-                        seed = witch_mix(witch_read64(p + 64) ^ witch_long_secret[2], witch_read64(p + 72) ^ seed);
+                        seed = bfhash_mix(bfhash_read64(p + 64) ^ bfhash_long_secret[2], bfhash_read64(p + 72) ^ seed);
                         if (i > 96) {
-                            seed = witch_mix(witch_read64(p + 80) ^ witch_long_secret[1], witch_read64(p + 88) ^ seed);
+                            seed = bfhash_mix(bfhash_read64(p + 80) ^ bfhash_long_secret[1], bfhash_read64(p + 88) ^ seed);
                         }
                     }
                 }
             }
         }
     }
-    a = witch_read64(p + i - 16) ^ (uint64_t)i;
-    b = witch_read64(p + i - 8);
-    a ^= witch_long_secret[1];
+    a = bfhash_read64(p + i - 16) ^ (uint64_t)i;
+    b = bfhash_read64(p + i - 8);
+    a ^= bfhash_long_secret[1];
     b ^= seed;
-    witch_mul128(a, b, h1, h2);
+    bfhash_mul128(a, b, h1, h2);
 }
