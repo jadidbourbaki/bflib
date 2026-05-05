@@ -23,7 +23,7 @@ speedup.pdf: results.csv speedup.gp
 plot: latency.pdf speedup.pdf
 
 .PHONY: clean
-clean:
+clean: clean-results
 	rm -f bench
 
 .PHONY: clean-results

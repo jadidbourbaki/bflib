@@ -1,0 +1,44 @@
+name: benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  bfhash-bench:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install gnuplot
+        run: sudo apt-get update && sudo apt-get install -y gnuplot
+
+      - name: Build bench
+        run: make -C bfhash_bench bench
+
+      - name: Run bench (generates results.csv)
+        run: make -C bfhash_bench csv
+
+      - name: Generate plots
+        run: make -C bfhash_bench plot
+
+      - name: Show results.csv in log
+        run: cat bfhash_bench/results.csv
+
+      - name: Upload bench artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bfhash-bench-${{ github.sha }}
+          path: |
+            bfhash_bench/results.csv
+            bfhash_bench/latency.pdf
+            bfhash_bench/speedup.pdf
+          retention-days: 30
+          if-no-files-found: error
