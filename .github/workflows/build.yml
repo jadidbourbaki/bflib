@@ -17,13 +17,13 @@ jobs:
         cc: [gcc, clang]
 
     steps:
-      - name: Checkout (with submodules)
-        uses: actions/checkout@v4
+      - name: Checkout with submodules
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
       - name: Build tests
-        run: make -C bfhash_tests CC=${{ matrix.cc }}
+        run: make -C tests CC=${{ matrix.cc }}
 
       - name: Run tests
-        run: make -C bfhash_tests run
+        run: make -C tests run

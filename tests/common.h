@@ -6,7 +6,7 @@
  *
  * Usage:
  *
- *   #include "test_common/test_harness.h"
+ *   #include "common.h"
  *
  *   static int test_one_plus_one(void) {
  *       TEST_ASSERT(1 + 1 == 2);
@@ -22,7 +22,7 @@
  * program should include this header in exactly one translation unit.
  *
  * To add new assertion macros, follow the pattern of TEST_ASSERT_EQ_U64
- * below: print "expected X, got Y" on failure and `return 1;` so the
+ * below: print "expected X, got Y" on failure and return 1 so the
  * RUN_TEST runner sees the fail.
  */
 
@@ -65,7 +65,7 @@ static int g_fail = 0;
 } while (0)
 
 /* Print pass/fail summary and return 0 if everything passed, 1 if
- * anything failed. Call from main: `return TEST_REPORT();`. */
+ * anything failed. Call from main: return TEST_REPORT(); */
 #define TEST_REPORT() ( \
     printf("%d passed, %d failed\n", g_pass, g_fail), \
     (g_fail ? 1 : 0) \

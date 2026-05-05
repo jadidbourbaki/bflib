@@ -46,8 +46,8 @@ typedef uint64_t (*hash_wrapper_t)(const void *src, size_t size, const uint64_t 
 
 /*
  * The wrappers below are deliberately left inlinable. The compiler
- * is free to inline rapidhash_wrap and rapidhash_x2_wrap (small
- * one-liners) while leaving the larger size-dispatch body of
+ * is free to inline rapidhash_wrap and rapidhash_x2_wrap, which are
+ * small one-liners, while leaving the larger size-dispatch body of
  * bfhash_wrap as a real call. That asymmetry hands rapidhash every
  * available compiler advantage: zero call overhead, cross-call
  * optimization, hoisted seed loads. We accept that handicap. The

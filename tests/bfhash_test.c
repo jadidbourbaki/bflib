@@ -28,7 +28,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "bfhash.h"
-#include "test_common/test_harness.h"
+#include "common.h"
 
 /* Fixed test seeds for reproducibility. */
 static const uint64_t S_U64[BFHASH_U64_SEEDS] = {

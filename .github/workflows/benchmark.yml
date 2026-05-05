@@ -7,9 +7,15 @@ jobs:
   bfhash-bench:
     runs-on: ubuntu-latest
 
+    # contents: write lets the workflow force-push the generated
+    # artifacts to the bench-results branch so the README can embed
+    # the PNG plots via raw.githubusercontent URLs.
+    permissions:
+      contents: write
+
     steps:
-      - name: Checkout (with submodules)
-        uses: actions/checkout@v4
+      - name: Checkout with submodules
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -17,24 +23,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gnuplot
 
       - name: Build bench
-        run: make -C bfhash_bench bench
+        run: make -C bench bfhash_bench
 
-      - name: Run bench (generates results.csv)
-        run: make -C bfhash_bench csv
+      - name: Run bench and write bfhash_results.csv
+        run: make -C bench csv
 
       - name: Generate plots
-        run: make -C bfhash_bench plot
+        run: make -C bench plot
 
-      - name: Show results.csv in log
-        run: cat bfhash_bench/results.csv
+      - name: Show bfhash_results.csv in log
+        run: cat bench/bfhash_results.csv
 
-      - name: Upload bench artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: bfhash-bench-${{ github.sha }}
-          path: |
-            bfhash_bench/results.csv
-            bfhash_bench/latency.pdf
-            bfhash_bench/speedup.pdf
-          retention-days: 30
-          if-no-files-found: error
+      # Force-push the latest artifacts to the bench-results branch
+      # so the README on main can embed the PNGs via raw URLs. The
+      # logic lives in a separate shell script for readability and
+      # local testability.
+      - name: Push artifacts to bench-results branch
+        run: .github/scripts/push_bench_results.sh "${{ github.sha }}"

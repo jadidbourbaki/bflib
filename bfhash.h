@@ -1,14 +1,79 @@
 /*
- * bfhash is the Bloom-filter-specialized hash used by bflib. One
- * 64x64 -> 128 multiply yields the two hashes used for Kirsch-
- * Mitzenmacher double hashing.
+ * bfhash is the Bloom-filter-specialized hash used by bflib. It
+ * provides four entry points that produce two 64-bit outputs from one
+ * 64x64 -> 128 multiply, sized for the major Bloom filter key regimes:
+ *
+ *     bfhash_u64      fixed 8-byte uint64 keys.
+ *     bfhash_short    variable-length keys in [8, 16] bytes.
+ *     bfhash_medium   variable-length keys in [17, 32] bytes.
+ *     bfhash_long     variable-length keys longer than 32 bytes.
+ *
+ * Each variant returns h1 and h2 in a single call. The two outputs
+ * are intended as the independent hashes that Kirsch-Mitzenmacher
+ * double hashing requires to derive k Bloom filter indices via
+ * g_i(x) = h1 + i * h2 mod m. Producing both outputs from one
+ * multiply rather than from two separate hash calls is the main
+ * reason a Bloom filter using bfhash is faster than one using a
+ * general-purpose 64-bit hash.
+ *
+ * Theoretical basis.
+ *
+ * The short-side variants bfhash_u64, bfhash_short, and bfhash_medium
+ * implement Thorup's pair-multiply-shift and prefix-pair-multiply-
+ * shift constructions from his lecture notes "High Speed Hashing for
+ * Integers and Strings", arXiv:1504.06804, sections 2.3 and 5.1. The
+ * top 32 bits of h1 are strongly universal per Thorup theorem 3.7.
+ * The high 64 bits of h2 are empirically well-mixed but not formally
+ * analyzed by Thorup.
+ *
+ * The long variant bfhash_long is rapidhash V3's 7-lane parallel
+ * mixing loop, stripped of two operations: the seed-mixing prologue
+ * and the final 64-bit fold. The 7-lane structure is the entire
+ * speed win for long keys, since seven multiplies pipeline through
+ * the hardware multiplier port at near-peak throughput. Modern x86
+ * cores have one integer multiplier port with one-multiply-per-cycle
+ * throughput and three-cycle latency, so seven independent multiplies
+ * complete in about ten cycles rather than the twenty-one cycles a
+ * sequential dependency chain would need. AMD Zen and Apple M cores
+ * expose similar single-port multiplier bottlenecks. The strip
+ * removes work that Bloom filters do not need, since there is no
+ * adversary to defend against and Kirsch-Mitzenmacher needs two
+ * outputs rather than one strongly avalanched 64-bit output. The
+ * remaining lane structure inherits rapidhash's empirical SMHasher
+ * quality on extracted index bits.
+ *
+ * Threat model.
+ *
+ * bfhash assumes no adversary. The seed is fixed at Bloom filter
+ * creation and is not exposed to attacker-controlled inputs. Use
+ * cases that need adversarial robustness, such as hash tables with
+ * untrusted keys, should use a hash designed for that, not bfhash.
+ *
+ * Extraction contract.
+ *
+ * Callers must extract Bloom indices from the high bits of h1 and h2,
+ * not from the low bits. This is structural to multiplicative
+ * hashing: bit i of a * x mod 2^w depends only on bits 0..i of x.
+ * Use top-bit shift or Lemire's fast modulo to obtain an index. The
+ * per-function comments below give the exact recipe.
+ *
+ * Attribution.
  *
  * Several techniques and one constant are borrowed from rapidhash V3
  * by Nicolas De Carli, used under the MIT license. Each borrowing is
- * annotated at its site. See third_party/rapidhash for the original.
+ * annotated at its site. See third_party/rapidhash for the original
+ * source.
+ *
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 hayder
+ *
+ * This file is part of bflib. See the LICENSE file in the project
+ * root for the full MIT license text.
  */
 
 #pragma once
+
+#include "bflib_version.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -74,10 +139,10 @@
 #define BFHASH_SECRET UINT64_C(0x2d358dccaa6c78a5)
 #endif
 
-/* Seed counts per hash function. Each bfhash_* function takes
-   `seeds`, a pointer to an array of BFHASH_*_SEEDS uniform random
-   uint64. A Bloom filter using bfhash generates this array
-   once at filter creation. */
+/* Seed counts per hash function. Each bfhash_* function takes a
+   seeds pointer to an array of BFHASH_*_SEEDS uniform random uint64
+   values. A Bloom filter using bfhash generates this array once at
+   filter creation. */
 #define BFHASH_U64_SEEDS    3
 #define BFHASH_SHORT_SEEDS  3
 #define BFHASH_MEDIUM_SEEDS 5
@@ -366,8 +431,8 @@ BF_INLINE_CONSTEXPR void bfhash_medium(const void *key, size_t len,
 /* Hash a variable-length key longer than 32 bytes into two hashes for
  * Kirsch-Mitzenmacher double hashing.
  *
- * This is rapidhash V3's long-key path with two operations stripped
- * (the prologue and the final fold) and the secret table reused as
+ * This is rapidhash V3's long-key path with two operations stripped,
+ * the prologue and the final fold, and the secret table reused as
  * file constants. Below is rapidhash's long-key code from
  * rapidhash_internal in rapidhash.h, annotated line-by-line with
  * what bfhash_long does to it. Comments and braces collapsed for
