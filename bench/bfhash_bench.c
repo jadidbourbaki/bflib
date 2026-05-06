@@ -28,6 +28,7 @@
 
 #include "bfhash.h"
 #include "rapidhash.h"
+#include "aeshash.h"
 
 #define BUFFER_SIZE 4096
 #define MARGIN 64
@@ -67,7 +68,7 @@ static uint64_t rapidhash_x2_wrap(const void *src, size_t size, const uint64_t *
 }
 
 static uint64_t bfhash_wrap(const void *src, size_t size, const uint64_t *seeds) {
-    uint64_t h1 = 0, h2 = 0;
+    uint32_t h1 = 0, h2 = 0;
     if (size == 8) {
         uint64_t k;
         memcpy(&k, src, 8);
@@ -79,8 +80,22 @@ static uint64_t bfhash_wrap(const void *src, size_t size, const uint64_t *seeds)
     } else {
         bfhash_long(src, size, seeds, &h1, &h2);
     }
-    return h1 ^ h2;
+    return (uint64_t)(h1 ^ h2);
 }
+
+#if AESHASH_AVAILABLE
+static uint64_t aeshash_wrap(const void *src, size_t size, const uint64_t *seeds) {
+    uint32_t h1 = 0, h2 = 0;
+    if (size == 8) {
+        uint64_t k;
+        memcpy(&k, src, 8);
+        aeshash_u64(k, seeds, &h1, &h2);
+    } else {
+        aeshash(src, size, seeds, &h1, &h2);
+    }
+    return (uint64_t)(h1 ^ h2);
+}
+#endif
 
 /*
  * Each iteration writes one byte at buf[chain & CHAIN_MASK] and then
@@ -164,6 +179,11 @@ int main(void) {
         UINT64_C(0x0123456789abcdef),
         UINT64_C(0xa5a5a5a5a5a5a5a5),
         UINT64_C(0x5a5a5a5a5a5a5a5a),
+        UINT64_C(0x6c6f6f6b696e673f),
+        UINT64_C(0x736565647363616e),
+        UINT64_C(0x0badc0deba5edba1),
+        UINT64_C(0xfacebeef13579bdf),
+        UINT64_C(0x2468ace013579bdf),
     };
 
     static const size_t sizes[] = {
@@ -180,13 +200,23 @@ int main(void) {
     };
     static const size_t nsizes  = sizeof(sizes) / sizeof(sizes[0]);
 
-    /* CSV header. Latencies are in ns/call. Speedup is rapidhash*2 / bfhash. */
+    /* CSV header. Latencies are in ns/call. speedup_vs_rh2 is
+     * rapidhash*2 / bfhash. speedup_aes is aeshash / bfhash; values
+     * > 1 mean bfhash is faster. The aeshash column is omitted on
+     * builds without AES intrinsics. */
+#if AESHASH_AVAILABLE
+    printf("size_bytes,rapidhash_ns,rapidhash_x2_ns,bfhash_ns,aeshash_ns,speedup_vs_rh2,speedup_aes_vs_bf\n");
+#else
     printf("size_bytes,rapidhash_ns,rapidhash_x2_ns,bfhash_ns,speedup_vs_rh2\n");
+#endif
     fflush(stdout);
 
     for (size_t i = 0; i < nsizes; i++) {
         size_t size = sizes[i];
         double r1 = 1e18, r2 = 1e18, bf = 1e18;
+#if AESHASH_AVAILABLE
+        double ae = 1e18;
+#endif
         for (int rep = 0; rep < REPS; rep++) {
             double a = bench_latency(rapidhash_wrap,    buf, size, seeds);
             double b = bench_latency(rapidhash_x2_wrap, buf, size, seeds);
@@ -194,9 +224,19 @@ int main(void) {
             if (a < r1) r1 = a;
             if (b < r2) r2 = b;
             if (c < bf) bf = c;
+#if AESHASH_AVAILABLE
+            double d = bench_latency(aeshash_wrap, buf, size, seeds);
+            if (d < ae) ae = d;
+#endif
         }
         double speedup = r2 / bf;
+#if AESHASH_AVAILABLE
+        double aes_ratio = ae / bf;
+        printf("%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+               size, r1, r2, bf, ae, speedup, aes_ratio);
+#else
         printf("%zu,%.4f,%.4f,%.4f,%.4f\n", size, r1, r2, bf, speedup);
+#endif
         fflush(stdout);
     }
 

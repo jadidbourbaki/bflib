@@ -2,7 +2,7 @@ CC      ?= clang
 CFLAGS  ?= -O3 -Wall -Wextra -std=c99
 INCLUDES = -I.. -I../third_party/rapidhash
 
-bfhash_bench: bfhash_bench.c ../bfhash.h ../third_party/rapidhash/rapidhash.h
+bfhash_bench: bfhash_bench.c ../bfhash.h ../third_party/rapidhash/rapidhash.h aeshash.h
 	$(CC) $(CFLAGS) $(INCLUDES) -o bfhash_bench bfhash_bench.c
 
 .PHONY: all

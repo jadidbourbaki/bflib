@@ -53,6 +53,17 @@ static int g_fail = 0;
     } \
 } while (0)
 
+#define TEST_ASSERT_EQ_U32(actual, expected) do { \
+    uint32_t _a = (actual), _e = (expected); \
+    if (_a != _e) { \
+        fprintf(stderr, "  ASSERT failed at %s:%d: " \
+                "expected 0x%08x, got 0x%08x\n", \
+                __FILE__, __LINE__, \
+                (unsigned)_e, (unsigned)_a); \
+        return 1; \
+    } \
+} while (0)
+
 #define RUN_TEST(fn) do { \
     int _r = fn(); \
     if (_r == 0) { \

@@ -1,7 +1,7 @@
 /*
  * bfhash is the Bloom-filter-specialized hash used by bflib. It
- * provides four entry points that produce two 64-bit outputs from one
- * 64x64 -> 128 multiply, sized for the major Bloom filter key regimes:
+ * provides four entry points that produce two 32-bit outputs sized
+ * for the major Bloom filter key regimes:
  *
  *     bfhash_u64      fixed 8-byte uint64 keys.
  *     bfhash_short    variable-length keys in [8, 16] bytes.
@@ -14,17 +14,33 @@
  * g_i(x) = h1 + i * h2 mod m. Producing both outputs from one
  * multiply rather than from two separate hash calls is the main
  * reason a Bloom filter using bfhash is faster than one using a
- * general-purpose 64-bit hash.
+ * general-purpose hash.
+ *
+ * Thorup's pair- and prefix-pair-multiply-shift
+ * proofs guarantee strong universality only on the top l <= 32 bits
+ * of the 64-bit product. We take l = 32 internally so the API
+ * returns exactly the universal slice. The bottom bits of a
+ * multiply-shift hash carry less information about the input than
+ * the top bits and are not universal, so exposing them to callers
+ * would create a footgun. A Bloom filter with m up to 2^32 covers
+ * a 4 GiB bit array, which is far beyond any practical filter, so
+ * capping at 32 bits costs nothing in practice.
  *
  * Theoretical basis.
  *
  * The short-side variants bfhash_u64, bfhash_short, and bfhash_medium
  * implement Thorup's pair-multiply-shift and prefix-pair-multiply-
  * shift constructions from his lecture notes "High Speed Hashing for
- * Integers and Strings", arXiv:1504.06804, sections 2.3 and 5.1. The
- * top 32 bits of h1 are strongly universal per Thorup theorem 3.7.
- * The high 64 bits of h2 are empirically well-mixed but not formally
- * analyzed by Thorup.
+ * Integers and Strings", arXiv:1504.06804, sections 3.5 and 5.1.
+ * Each variant runs the construction twice with disjoint seeds, one
+ * run per output, then returns the top 32 bits of each run, so h1
+ * and h2 are each strongly universal: bfhash_u64 follows equation 18
+ * with strong universality given as exercise 3.10, and bfhash_short
+ * and bfhash_medium follow equation 20 with strong universality
+ * given as exercise 5.1. Both proofs are analogous to theorem 3.7's
+ * proof for the vector multiply-shift in section 3.4. There is no
+ * empirical claim about either output; both have a paper-grade
+ * guarantee.
  *
  * The long variant bfhash_long is rapidhash V3's 7-lane parallel
  * mixing loop, stripped of two operations: the seed-mixing prologue
@@ -49,13 +65,21 @@
  * cases that need adversarial robustness, such as hash tables with
  * untrusted keys, should use a hash designed for that, not bfhash.
  *
- * Extraction contract.
+ * Index extraction.
  *
- * Callers must extract Bloom indices from the high bits of h1 and h2,
- * not from the low bits. This is structural to multiplicative
- * hashing: bit i of a * x mod 2^w depends only on bits 0..i of x.
- * Use top-bit shift or Lemire's fast modulo to obtain an index. The
- * per-function comments below give the exact recipe.
+ * h1 and h2 are 32-bit values each strongly universal on their full
+ * width. Callers can use them directly with either of:
+ *
+ *   1. Top-bit shift: index = h >> (32 - log2(m)). Requires m to be
+ *      a power of two.
+ *
+ *   2. Lemire's fast modulo: index = ((uint64_t)h * m) >> 32. Valid
+ *      for any m up to 2^32. Computes the top bits of a (h, m)
+ *      multiply scaled to the range [0, m).
+ *
+ * Avoid index = h % m. It uses low bits as the high-order digits of
+ * the remainder, which mixes well-mixed bits with less-mixed ones
+ * and is slower than Lemire's method.
  *
  * Attribution.
  *
@@ -142,10 +166,16 @@
 /* Seed counts per hash function. Each bfhash_* function takes a
    seeds pointer to an array of BFHASH_*_SEEDS uniform random uint64
    values. A Bloom filter using bfhash generates this array once at
-   filter creation. */
-#define BFHASH_U64_SEEDS    3
-#define BFHASH_SHORT_SEEDS  3
-#define BFHASH_MEDIUM_SEEDS 5
+   filter creation.
+
+   The short-side variants run two independent copies of Thorup's
+   pair- or prefix-pair-multiply-shift, one per output, so each
+   variant needs twice the seed material a single-output run would
+   take. This makes both h1 and h2 strongly universal on their top
+   32 bits, with no reliance on empirical claims about either. */
+#define BFHASH_U64_SEEDS    6
+#define BFHASH_SHORT_SEEDS  6
+#define BFHASH_MEDIUM_SEEDS 10
 #define BFHASH_LONG_SEEDS   1
 
 /* Per-lane secrets for bfhash_long's parallel-lane mixing. Taken
@@ -229,99 +259,81 @@ BF_INLINE_CONSTEXPR uint64_t bfhash_mix(uint64_t a, uint64_t b) BF_NOEXCEPT {
 /* Hash a fixed 8-byte uint64 key into two hashes for Kirsch-Mitzenmacher
  * double hashing.
  *
- * The construction is Thorup's pair-multiply-shift specialized to
- * 64-bit keys. From the tuned C code on page 16 of [1]:
+ * The construction is two independent runs of Thorup's pair-multiply-
+ * shift, one per output, using disjoint slices of the seed array.
+ * Each run follows the tuned C code on page 16 of [1]:
  *
  *     hash(x, l, a1, a2, b) = ((a1 + x) * (a2 + (x >> 32)) + b) >> (64 - l)
  *
- * The two operands are 64-bit. Their product mod 2^64, plus the offset
- * b, shifted to extract the top l bits, is strongly universal for
- * l <= 32. This is theorem 3.7 of [1] specialized to d = 2 with 32-bit
- * coordinates and w = 64.
+ * Their product mod 2^64, plus the offset b, shifted to extract the
+ * top l bits, is strongly universal for l <= 32. This is the pair-
+ * multiply-shift construction from section 3.5 of [1], equation 18,
+ * specialized to d = 2 with 32-bit coordinates and w = 64; the
+ * page-16 C code implements this case. Strong universality on the
+ * top l bits is given as exercise 3.10, with a proof analogous to
+ * theorem 3.7's proof for the vector multiply-shift in section 3.4.
  *
- * Bfhash_u64 keeps the full 128-bit product instead of truncating
- * to 64. The low 64 bits, after adding b, become h1; the top 32 bits
- * of h1 carry Thorup's strong universality bound. The high 64 bits of
- * the product become h2; h2 is a function of all 128 bits of the
- * multiply and is empirically well-mixed but not formally analyzed by
- * Thorup.
+ * We take l = 32 (the maximum the proof allows) and return the top
+ * 32 bits as a uint32_t. Running the construction twice with disjoint
+ * seeds means both h1 and h2 are independently Thorup-strongly-
+ * universal. There is no empirical claim about either output; both
+ * have a paper-grade guarantee.
  *
- * Three random seeds are required, all uniform random uint64. The
+ * Six random seeds are required, all uniform random uint64. The
  * Bloom filter generates them once at filter creation and passes them
  * to every hash call.
  *
- * Extracting Bloom indices.
- *
- * Callers must extract Bloom indices from the high bits of h1 and h2,
- * not from the low bits. The reason is structural to multiplicative
- * hashing. Bit i of (a * x) mod 2^w depends only on bits 0..i of x,
- * so the low bits of any multiply-based hash carry less information
- * about the input than the high bits do. Two inputs that differ only
- * in their high bits produce identical low bits in their products, so
- * extracting low bits gives a hash that is not universal.
- *
- * Two extraction methods satisfy this requirement:
- *
- *   1. Top-bit shift: index = h >> (w - log2(m)). Requires m to be
- *      a power of two.
- *
- *   2. Lemire's fast modulo from [2]: index = (h * m) >> w. Valid
- *      for any m. Computes the top bits of h scaled to the range
- *      [0, m).
- *
- * Avoid the naive index = h % m. It uses low bits and is not
- * universal under multiplicative hashing.
- *
  * [1] Mikkel Thorup, "High Speed Hashing for Integers and Strings",
  *     https://arxiv.org/pdf/1504.06804
- * [2] Daniel Lemire, "Fast Random Integer Generation in an Interval",
- *     https://arxiv.org/abs/1805.10941
  *
- * Critical path: 2 ADDs in parallel, 1 multiply, 1 ADD. About 5 to 6
- * cycles.
+ * Critical path: 2 ADDs, 1 multiply, 1 ADD, 1 shift per output. The
+ * two runs pipeline through the multiplier port back-to-back, so the
+ * second output finishes one cycle after the first. About 6 cycles
+ * total.
  *
  * @param  key    The 8-byte key to hash, passed by value.
- * @param  seeds  Array of BFHASH_U64_SEEDS = 3 uniform random
- *                uint64. seeds[0] = a1, seeds[1] = a2, seeds[2] = b
- *                in Thorup's notation.
- * @param  h1     Output: low 64 bits of (a1+key) * (a2+(key>>32)) + b.
- *                Top 32 bits are strongly universal.
- * @param  h2     Output: high 64 bits of the same product. Empirically
- *                well-mixed.
+ * @param  seeds  Array of BFHASH_U64_SEEDS = 6 uniform random
+ *                uint64. seeds[0..2] are (a1, a2, b) for h1 and
+ *                seeds[3..5] are (a1, a2, b) for h2 in Thorup's
+ *                notation.
+ * @param  h1     Output: top 32 bits of ((seeds[0]+key) *
+ *                (seeds[1]+(key>>32)) + seeds[2]) mod 2^64.
+ *                Strongly universal.
+ * @param  h2     Output: top 32 bits of ((seeds[3]+key) *
+ *                (seeds[4]+(key>>32)) + seeds[5]) mod 2^64.
+ *                Strongly universal.
  */
 BF_INLINE_CONSTEXPR void bfhash_u64(uint64_t key,
                                     const uint64_t *seeds,
-                                    uint64_t *h1, uint64_t *h2) BF_NOEXCEPT {
-    uint64_t lo = 0, hi = 0;
-    bfhash_mul128(seeds[0] + key, seeds[1] + (key >> 32), &lo, &hi);
-    *h1 = lo + seeds[2];
-    *h2 = hi;
+                                    uint32_t *h1, uint32_t *h2) BF_NOEXCEPT {
+    *h1 = (uint32_t)(((seeds[0] + key) * (seeds[1] + (key >> 32)) + seeds[2]) >> 32);
+    *h2 = (uint32_t)(((seeds[3] + key) * (seeds[4] + (key >> 32)) + seeds[5]) >> 32);
 }
 
 /* Hash a variable-length key in [8, 16] bytes into two hashes for
  * Kirsch-Mitzenmacher double hashing.
  *
- * The construction is Thorup's prefix-pair-multiply-shift, equation
- * (20) of section 5.1 of [1], specialized to d = 2 with 64-bit
- * chunks obtained from the front and back of the input via
- * rapidhash's overlap-read trick:
+ * The construction is two independent runs of Thorup's prefix-pair-
+ * multiply-shift, one per output, using disjoint slices of the seed
+ * array. Each run follows equation 20 of section 5.1 of [1],
+ * specialized to d = 2 with 64-bit chunks obtained from the front
+ * and back of the input via rapidhash's overlap-read trick:
  *
  *     x_0 = read64(p)
  *     x_1 = read64(p + len - 8)
- *     h   = ((a_0 + x_1)(a_1 + x_0) + a_2) [w - l, w]
+ *     h   = ((a_0 + x_1)(a_1 + x_0) + a_2 + len) [w - l, w]
  *
  * Note the cross-pairing. Seed a_0 multiplies the operand containing
  * x_1, and seed a_1 multiplies the operand containing x_0. This is
- * the form proven strongly universal by Thorup. We add len to the
- * offset to disambiguate inputs of different lengths covered by the
- * same overlap-read.
+ * the form proven strongly universal by exercise 5.1 of [1]. We add
+ * len to the offset to disambiguate inputs of different lengths
+ * covered by the same overlap-read.
  *
- * Bfhash_short keeps the full 128-bit product. The low 64 bits,
- * plus a_2 plus len, become h1; the top 32 bits of h1 are strongly
- * universal per Thorup. The high 64 bits become h2, empirically
- * well-mixed.
+ * We take l = 32 (the maximum the proof allows) and return the top
+ * 32 bits of each run. Running the construction twice with disjoint
+ * seeds means both h1 and h2 are independently strongly universal.
  *
- * Three random seeds are required, all uniform random uint64. The
+ * Six random seeds are required, all uniform random uint64. The
  * Bloom filter generates them once at filter creation and passes them
  * to every hash call.
  *
@@ -330,102 +342,104 @@ BF_INLINE_CONSTEXPR void bfhash_u64(uint64_t key,
  * the two operands differ regardless, so the multiply is never a
  * square.
  *
- * The extraction-method contract is the same as bfhash_u64. See
- * its comment for the two safe methods and the structural reason low
- * bits are not universal.
- *
  * [1] Mikkel Thorup, "High Speed Hashing for Integers and Strings",
  *     https://arxiv.org/pdf/1504.06804
  *
- * Critical path: 2 reads, 2 ADDs in parallel, 1 multiply, 1 ADD.
- * About 5 to 6 cycles plus load latency.
+ * Critical path: 2 reads, 2 ADDs, 1 multiply, 1 ADD, 1 shift per
+ * output. The two runs pipeline through the multiplier port back-
+ * to-back, so the second output finishes one cycle after the first.
+ * About 7 cycles total, plus load latency.
  *
  * @param  key    Pointer to a key of length [8, 16] bytes.
  * @param  len    Key length in bytes. Must be in [8, 16].
- * @param  seeds  Array of BFHASH_SHORT_SEEDS = 3 uniform random
- *                uint64. seeds[0] = a_0, seeds[1] = a_1, seeds[2] =
- *                a_2 in Thorup's notation.
- * @param  h1     Output: low 64 bits of (a_0 + x_1)(a_1 + x_0) plus
- *                a_2 plus len. Top 32 bits are strongly universal.
- * @param  h2     Output: high 64 bits of the same product. Empirically
- *                well-mixed.
+ * @param  seeds  Array of BFHASH_SHORT_SEEDS = 6 uniform random
+ *                uint64. seeds[0..2] are (a_0, a_1, a_2) for h1 and
+ *                seeds[3..5] are (a_0, a_1, a_2) for h2 in Thorup's
+ *                notation.
+ * @param  h1     Output: top 32 bits of ((seeds[0] + x_1)(seeds[1] +
+ *                x_0) + seeds[2] + len) mod 2^64. Strongly universal.
+ * @param  h2     Output: top 32 bits of ((seeds[3] + x_1)(seeds[4] +
+ *                x_0) + seeds[5] + len) mod 2^64. Strongly universal.
  */
 BF_INLINE_CONSTEXPR void bfhash_short(const void *key, size_t len,
                                        const uint64_t *seeds,
-                                       uint64_t *h1, uint64_t *h2) BF_NOEXCEPT {
+                                       uint32_t *h1, uint32_t *h2) BF_NOEXCEPT {
     const uint8_t *p = (const uint8_t *)key;
     uint64_t x0 = bfhash_read64(p);
     uint64_t x1 = bfhash_read64(p + len - 8);
-    uint64_t lo = 0, hi = 0;
-    bfhash_mul128(seeds[0] + x1, seeds[1] + x0, &lo, &hi);
-    *h1 = lo + seeds[2] + (uint64_t)len;
-    *h2 = hi;
+    uint64_t L = (uint64_t)len;
+    *h1 = (uint32_t)(((seeds[0] + x1) * (seeds[1] + x0) + seeds[2] + L) >> 32);
+    *h2 = (uint32_t)(((seeds[3] + x1) * (seeds[4] + x0) + seeds[5] + L) >> 32);
 }
 
 /* Hash a variable-length key in [17, 32] bytes into two hashes for
  * Kirsch-Mitzenmacher double hashing.
  *
- * The construction is Thorup's prefix-pair-multiply-shift, equation
- * (20) of section 5.1 of [1], specialized to d = 4 with 64-bit chunks
- * obtained from the front and back halves of the input via the
- * overlap-read trick:
+ * The construction is two independent runs of Thorup's prefix-pair-
+ * multiply-shift, one per output, using disjoint slices of the seed
+ * array. Each run follows equation 20 of section 5.1 of [1],
+ * specialized to d = 4 with 64-bit chunks obtained from the front
+ * and back halves of the input via the overlap-read trick:
  *
  *     x_0 = read64(p)
  *     x_1 = read64(p + 8)
  *     x_2 = read64(p + len - 16)
  *     x_3 = read64(p + len - 8)
- *     h   = ((a_0 + x_1)(a_1 + x_0) + (a_2 + x_3)(a_3 + x_2) + a_4)
+ *     h   = ((a_0 + x_1)(a_1 + x_0) + (a_2 + x_3)(a_3 + x_2)
+ *           + a_4 + len) [w - l, w]
  *
  * For len == 32 the four reads are non-overlapping and tile the input
- * exactly. For len in [17, 31] the front pair (x_0, x_1) and back
- * pair (x_2, x_3) overlap somewhere in the middle, but every byte of
- * the input appears in at least one chunk. We add len to the offset
- * to disambiguate inputs of different lengths.
+ * exactly. For len in [17, 31] the front pair x_0, x_1 and back pair
+ * x_2, x_3 overlap somewhere in the middle, but every byte of the
+ * input appears in at least one chunk. len is mixed in to
+ * disambiguate inputs of different lengths.
  *
- * The two pair products are computed as full 128-bit values and
- * summed with full carry. h1 is the low 64 bits of the sum plus a_4
- * plus len; the top 32 bits of h1 are strongly universal per Thorup.
- * h2 is the high 64 bits of the sum, empirically well-mixed.
+ * Strong universality on the top 32 bits is given as exercise 5.1 of
+ * [1]. We take l = 32 and return the top 32 bits of each run.
+ * Running the construction twice with disjoint seeds means both h1
+ * and h2 inherit that guarantee independently.
  *
- * Five random seeds are required, all uniform random uint64. The
+ * Ten random seeds are required, all uniform random uint64. The
  * Bloom filter generates them once at filter creation and passes them
  * to every hash call.
- *
- * The extraction-method contract is the same as bfhash_u64. See
- * its comment for details.
  *
  * [1] Mikkel Thorup, "High Speed Hashing for Integers and Strings",
  *     https://arxiv.org/pdf/1504.06804
  *
  * Critical path: 4 reads, 4 ADDs in parallel, 2 multiplies pipelined,
- * 128-bit ADD with carry, final ADD. About 7 to 8 cycles plus load
- * latency.
+ * 1 ADD, 1 shift per output. The two outputs share the four input
+ * loads and the four input ADDs, then run independent multiplies
+ * that pipeline back-to-back. About 9 cycles total plus load latency.
  *
  * @param  key    Pointer to a key of length [17, 32] bytes.
  * @param  len    Key length in bytes. Must be in [17, 32].
- * @param  seeds  Array of BFHASH_MEDIUM_SEEDS = 5 uniform random
- *                uint64. seeds[0..3] are the multipliers a_0..a_3;
- *                seeds[4] is the offset a_4.
- * @param  h1     Output: low 64 bits of the pair sum plus a_4 plus
- *                len. Top 32 bits are strongly universal.
- * @param  h2     Output: high 64 bits of the pair sum. Empirically
- *                well-mixed.
+ * @param  seeds  Array of BFHASH_MEDIUM_SEEDS = 10 uniform random
+ *                uint64. seeds[0..4] are (a_0, a_1, a_2, a_3, a_4)
+ *                for h1 and seeds[5..9] are the same for h2 in
+ *                Thorup's notation.
+ * @param  h1     Output: top 32 bits of ((seeds[0]+x_1)(seeds[1]+x_0)
+ *                + (seeds[2]+x_3)(seeds[3]+x_2) + seeds[4] + len) mod
+ *                2^64. Strongly universal.
+ * @param  h2     Output: same form using seeds[5..9]. Strongly
+ *                universal.
  */
 BF_INLINE_CONSTEXPR void bfhash_medium(const void *key, size_t len,
                                         const uint64_t *seeds,
-                                        uint64_t *h1, uint64_t *h2) BF_NOEXCEPT {
+                                        uint32_t *h1, uint32_t *h2) BF_NOEXCEPT {
     const uint8_t *p = (const uint8_t *)key;
     uint64_t x0 = bfhash_read64(p);
     uint64_t x1 = bfhash_read64(p + 8);
     uint64_t x2 = bfhash_read64(p + len - 16);
     uint64_t x3 = bfhash_read64(p + len - 8);
-    uint64_t lo1 = 0, hi1 = 0, lo2 = 0, hi2 = 0;
-    bfhash_mul128(seeds[0] + x1, seeds[1] + x0, &lo1, &hi1);
-    bfhash_mul128(seeds[2] + x3, seeds[3] + x2, &lo2, &hi2);
-    uint64_t lo_sum = lo1 + lo2;
-    uint64_t carry = (lo_sum < lo1);
-    *h1 = lo_sum + seeds[4] + (uint64_t)len;
-    *h2 = hi1 + hi2 + carry;
+    uint64_t L = (uint64_t)len;
+    uint64_t r1 = (seeds[0] + x1) * (seeds[1] + x0)
+                + (seeds[2] + x3) * (seeds[3] + x2)
+                + seeds[4] + L;
+    uint64_t r2 = (seeds[5] + x1) * (seeds[6] + x0)
+                + (seeds[7] + x3) * (seeds[8] + x2)
+                + seeds[9] + L;
+    *h1 = (uint32_t)(r1 >> 32);
+    *h2 = (uint32_t)(r2 >> 32);
 }
 
 /* Hash a variable-length key longer than 32 bytes into two hashes for
@@ -496,9 +510,9 @@ BF_INLINE_CONSTEXPR void bfhash_medium(const void *key, size_t len,
  *     finalization constant.
  *
  *   rapid_mum(&a, &b);
- *     [KEPT, renamed bfhash_mul128(a, b, h1, h2)] The unfolded multiply
- *     of the final operands. Both halves of the 128-bit product become
- *     h1 and h2 directly.
+ *     [KEPT, renamed bfhash_mul128] The unfolded multiply of the
+ *     final operands. The top 32 bits of each 64-bit half of the
+ *     128-bit product become h1 and h2.
  *
  *   return rapid_mix(a ^ secret[7], b ^ secret[1] ^ i);
  *     [STRIPPED] Final fold. Rapidhash combines the unfolded mum's
@@ -506,7 +520,8 @@ BF_INLINE_CONSTEXPR void bfhash_medium(const void *key, size_t len,
  *     avalanched 64-bit output. Kirsch-Mitzenmacher needs TWO outputs,
  *     and Bloom filters need only about log2(m) uniform bits per
  *     index, so full avalanche on a single output is unnecessary. We
- *     keep both halves of the unfolded mum directly.
+ *     keep both halves of the unfolded mum and slice the top 32 bits
+ *     of each.
  *
  * Strict universality is not claimed for this path. The construction
  * is empirically validated through rapidhash's existing test suite,
@@ -514,9 +529,6 @@ BF_INLINE_CONSTEXPR void bfhash_medium(const void *key, size_t len,
  * Bloom filter, the relevant property is that the extracted index
  * bits are well-distributed, which rapidhash has established for the
  * same 7-lane structure.
- *
- * The extraction-method contract is the same as bfhash_u64. See
- * its comment for details.
  *
  * Critical path: about 25 cycles for 256-byte input, dominated by the
  * 7 pipelined multiplies per 112-byte block. The rapidhash baseline
@@ -533,12 +545,14 @@ BF_INLINE_CONSTEXPR void bfhash_medium(const void *key, size_t len,
  * @param  seeds  Array of BFHASH_LONG_SEEDS = 1 uniform random
  *                uint64. seeds[0] is the master per-filter seed; the
  *                7 lane secrets are file constants.
- * @param  h1     Output: low 64 bits of the final 128-bit product.
- * @param  h2     Output: high 64 bits of the same product.
+ * @param  h1     Output: top 32 bits of the low 64 bits of the final
+ *                128-bit product.
+ * @param  h2     Output: top 32 bits of the high 64 bits of the
+ *                same product.
  */
 BF_INLINE_CONSTEXPR void bfhash_long(const void *key, size_t len,
                                       const uint64_t *seeds,
-                                      uint64_t *h1, uint64_t *h2) BF_NOEXCEPT {
+                                      uint32_t *h1, uint32_t *h2) BF_NOEXCEPT {
     const uint8_t *p = (const uint8_t *)key;
     size_t i = len;
     uint64_t seed = seeds[0];
@@ -588,5 +602,8 @@ BF_INLINE_CONSTEXPR void bfhash_long(const void *key, size_t len,
     b = bfhash_read64(p + i - 8);
     a ^= bfhash_long_secret[1];
     b ^= seed;
-    bfhash_mul128(a, b, h1, h2);
+    uint64_t lo = 0, hi = 0;
+    bfhash_mul128(a, b, &lo, &hi);
+    *h1 = (uint32_t)(lo >> 32);
+    *h2 = (uint32_t)(hi >> 32);
 }
